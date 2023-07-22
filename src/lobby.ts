@@ -89,6 +89,8 @@ export interface LobbyGameServerOptions {
 }
 
 export interface LobbyGameOptions {
+  /** The lobby provider to use. */
+  provider: LobbyProvider;
   /** The announcers that are in the game. */
   announcers: LobbyAnnouncer[];
   /** The territory that is in the game. */
@@ -330,20 +332,40 @@ export class Participant {
   }
 }
 
-export class LobbyGame {
+export interface LobbyProvider {
+  announce(
+    id: string,
+    host: string,
+    port: number,
+    arena: SimpleArenaObject,
+  ): Promise<void>;
+}
+
+export class GameLobby {
+  /** The id of the lobby. */
   readonly id = crypto.randomUUID();
+  /** The identity of the owner of the lobby. */
   readonly identity: Identity;
 
+  /** The lobby provider that is used to announce the game. */
+  #provider: LobbyProvider;
+  /** The arena that the game is using. */
   #arena: Arena;
+  /** The announcers that are added to the lobby. */
   #announcers: Set<LobbyAnnouncer>;
 
+  /** The server options that the game is using. */
   #serverOptions: LobbyGameServerOptions;
+  /** The server that the game is running on. */
   #server: Server;
+  /** The websocket server that the game is running on. */
   #wsServer: WebSocketServer;
 
+  /** The participants that are in the lobby. */
   #participants: Set<Participant> = new Set();
 
   constructor(options: LobbyGameOptions) {
+    this.#provider = options.provider;
     this.#arena = options.arena;
     this.#announcers = new Set(options.announcers);
     this.identity = options.identity ?? new Identity();
@@ -360,12 +382,22 @@ export class LobbyGame {
   }
 
   /**
-   * Gets the territory that is in the game.
+   * The lobby provider that is used to announce the game.
+   */
+  get provider(): LobbyProvider {
+    return this.#provider;
+  }
+
+  /**
+   * The arena that the game is using.
    */
   get arena(): DeepReadonly<Arena> {
     return this.#arena;
   }
 
+  /**
+   * The participants that are in the lobby.
+   */
   get participants(): ReadonlySet<Participant> {
     return this.#participants;
   }
@@ -373,23 +405,24 @@ export class LobbyGame {
   /**
    * Gets the announcers that are in the game.
    */
-  announcers(): ReadonlySet<LobbyAnnouncer>;
+  get announcers(): ReadonlySet<LobbyAnnouncer> {
+    return this.#announcers;
+  }
+
   /**
    * Adds the announcers to the game.
    * @param announcers The announcers to add to the game.
    */
-  announcers(
+  addAnnouncers(
     ...announcers: LobbyAnnouncer[]
-  ): ReadonlySet<LobbyAnnouncer> {
+  ): GameLobby {
     if (announcers.length) {
       for (const announcer of announcers) {
         this.#announcers.add(announcer);
       }
-
-      return this.#announcers;
-    } else {
-      return this.#announcers;
     }
+
+    return this;
   }
 
   /**
@@ -433,12 +466,7 @@ export class LobbyGame {
           headers: {
             "Content-Type": "application/json; charset=utf-8",
             "Content-Length": `${bodyBuf.byteLength}`,
-            "Identity": Buffer.from(
-              await crypto.subtle.digest(
-                "SHA-256",
-                new TextEncoder().encode(await this.identity.exportPublicKey()),
-              ),
-            ).toString("hex"),
+            "Identity": this.identity.identity!,
             "Signature": signature,
             "Api-Version": `${LOBBY_API_VERSION}`,
             "Runtime-Version": `${RTS_RUNTIME_VERSION}`,
@@ -681,12 +709,12 @@ export interface ChatMessage {
 
 export class GameLobbyChat {
   /** The lobby that the chat is in. */
-  readonly lobby: LobbyGame;
+  readonly lobby: GameLobby;
 
   /** The messages of the chat. */
   #messages: Set<ChatMessage> = new Set();
 
-  constructor(lobby: LobbyGame) {
+  constructor(lobby: GameLobby) {
     this.lobby = lobby;
   }
 
