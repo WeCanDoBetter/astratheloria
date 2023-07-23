@@ -1,13 +1,22 @@
 import type { Engine as EngineInterface, Entity, Fragment } from "./loop.js";
 
 export class Engine extends EventTarget implements EngineInterface {
-  #time = 0;
+  #currentTime = 0;
+  #previousTime = 0;
 
   #entities: Set<Entity> = new Set();
   #fragments: Set<Fragment> = new Set();
 
   get time(): number {
-    return this.#time;
+    return this.#currentTime;
+  }
+
+  get previousTime(): number {
+    return this.#previousTime;
+  }
+
+  get delta(): number {
+    return this.#currentTime - this.#previousTime;
   }
 
   get entities(): ReadonlySet<Entity> {
@@ -33,8 +42,14 @@ export class Engine extends EventTarget implements EngineInterface {
     return this;
   }
 
-  async update(): Promise<number> {
-    this.#time += 1;
-    return this.#time;
+  async update(time: number): Promise<void> {
+    if (this.#fragments.size) {
+      throw new Error("Engine must not have fragments.");
+    }
+
+    this.#previousTime = this.#currentTime;
+    this.#currentTime = time;
+
+    // TODO: Run engine game loop
   }
 }

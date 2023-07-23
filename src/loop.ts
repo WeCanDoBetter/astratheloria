@@ -1,6 +1,29 @@
+import {
+  Movement,
+  Orientation3D,
+  Vector3D,
+  Vector3DArray,
+} from "./code/movement.js";
+import {
+  EntityAttributeItems,
+  EntityEvent,
+  ReadonlyEntityAttributeItems,
+} from "./entity.js";
 import type { DeepReadonly } from "./lobby.js";
 
+/**
+ * The game engine. The game engine is responsible for running the game.
+ */
 export interface Engine extends EventTarget {
+  /** The current frame. */
+  readonly time: number;
+  /** The previous frame. */
+  readonly previousTime: number;
+  /** The delta between the current and previous frame. */
+  readonly delta: number;
+  /** The entities that are in the game. */
+  readonly entities: ReadonlySet<Entity>;
+
   /** The fragments that are added to the engine. */
   readonly fragments: ReadonlySet<Fragment>;
 
@@ -9,14 +32,11 @@ export interface Engine extends EventTarget {
    */
   clearFragments(): void;
 
-  /** The current frame. */
-  readonly time: number;
-
   /**
    * Runs the engine game loop. The game loop is a function that is called every frame.
-   * @returns The frame number that was run.
+   * @param time The current frame.
    */
-  update(): Promise<number>;
+  update(time: number): Promise<void>;
 
   /**
    * Adds an entity to the engine.
@@ -36,30 +56,66 @@ export interface Engine extends EventTarget {
  */
 export type Removetrigger = () => void;
 
+export interface EntityInit {
+  readonly id?: string;
+  readonly location: Vector3D;
+  readonly orientation?: Orientation3D;
+  readonly attributes: EntityAttributeItems;
+}
+
 /**
  * An entity is an object that is in the game. It can be a player, a projectile,
  * a building, etc.
  */
 export interface Entity extends EventTarget {
+  /** The ID of the entity. */
+  readonly id: string;
   /** The loops that are run when the entity is updated. */
   readonly loops: ReadonlySet<Loop>;
 
   /** The triggers that are fired when the entity is updated. */
-  readonly triggers: ReadonlyMap<Triggers, ReadonlySet<Trigger>>;
+  readonly triggers: ReadonlyMap<Triggers, ReadonlySet<TriggerListener>>;
 
   /** The fragments that are added to the entity. */
   readonly fragments: ReadonlySet<Fragment>;
 
+  /** The events that are fired when the entity is updated. */
+  readonly events: ReadonlyMap<string, ReadonlySet<EntityEvent>>;
+
+  /** The location of the entity. */
+  location: Vector3DArray;
+
+  /** The orientation of the entity. */
+  orientation: Vector3DArray;
+
+  /** The attributes of the entity. */
+  readonly attributes: ReadonlyEntityAttributeItems;
+
+  /** The movement of the entity. */
+  readonly movement?: Movement;
+
   /**
-   * If this is set, the entity will be asleep for the specified number of
-   * frames. The entity will not be updated during this time.
+   * If this is set, the entity will be asleep until the specified frame has
+   * passed. The entity will not be updated during this time.
    */
-  readonly sleep?: number;
+  readonly sleepUntil?: number;
 
   /**
    * Updates the entity. This is called every frame.
    */
   update(): void;
+
+  /**
+   * Sets the location of the entity.
+   * @param location The location to set.
+   */
+  setLocation(location: Vector3D): Entity;
+
+  /**
+   * Sets the orientation of the entity.
+   * @param orientation The orientation to set.
+   */
+  setOrientation(orientation: Orientation3D): Entity;
 
   /**
    * Adds one or more fragments to the entity.
@@ -81,13 +137,28 @@ export interface Entity extends EventTarget {
    */
   addTrigger<Args extends unknown[] = unknown[]>(
     trigger: Triggers,
-    listener: Trigger<Args>,
+    listener: TriggerListener<Args>,
   ): Removetrigger;
+
+  /**
+   * Adds an event to the entity.
+   * @param name The name of the event.
+   * @param args The arguments of the event.
+   */
+  addEvent<T extends Triggers, Args extends unknown[] = unknown[]>(
+    name: T,
+    ...args: Args
+  ): Entity;
 
   /**
    * Clears the triggers that are added to the entity.
    */
   clearTriggers(): Entity;
+
+  /**
+   * Clears the events that are added to the entity.
+   */
+  clearEvents(): Entity;
 
   /**
    * Runs a trigger. This is used to fire a trigger manually.
@@ -102,38 +173,61 @@ export interface Entity extends EventTarget {
   >(trigger: Trigger, ...args: Args): Entity;
 }
 
+/**
+ * The triggers that can be fired. These are used to run code when an event
+ * occurs. For example, when an entity is hit, the "hit" trigger is fired.
+ * @see Entity#addTrigger
+ */
 export type Triggers =
   | "hit"
   | "damage"
   | "attacked"
   | "built"
+  | "created"
   | "destroyed";
 
-export type Trigger<Args extends unknown[] = unknown[]> = (
-  entity: Entity,
-  engine: Engine,
-  ...rest: Args
+/**
+ * A trigger listener. This is called when a trigger is fired.
+ * @template Args The arguments that are passed to the trigger.
+ * @param args The arguments that are passed to the trigger.
+ */
+export type TriggerListener<Args extends unknown[] = unknown[]> = (
+  ...args: Args
 ) => void;
+
+/**
+ * A loop. A loop is a function that is called every frame.
+ * @param entity The entity that is being updated.
+ * @param engine The engine that is running the game.
+ * @returns The fragments that are added to the entity.
+ */
 export type Loop = (
   entity: Entity,
   engine: Engine,
-) => Fragment[];
+) => void;
 
-export interface Fragment {
+/**
+ * A fragment. A fragment is a value that is added to an entity. Fragments are
+ * used to update the game state.
+ */
+export interface Fragment<Value = unknown> {
   frame: number;
   key?: string;
   triggers?: Triggers[];
+  value: Value;
 }
 
 /**
  * The loop function. The loop function is called every frame.
+ * @param time The current frame.
  * @returns The result of the loop.
  */
-export type LoopFunction = () => Promise<LoopResult>;
+export type LoopFunction = (time: number) => Promise<LoopResult>;
 
 /**
  * The frame function. The frame function is called every frame.
  * @param fragments The fragments that have been collected.
+ * @returns A promise that resolves when the frame has been processed.
  */
 export type FrameFunction = (fragments: ReadonlySet<Fragment>) => Promise<void>;
 
@@ -160,22 +254,22 @@ export interface LoopResult {
  */
 export function createLoop(
   engine: Engine,
-  entities: ReadonlySet<Entity>,
+  entities: ReadonlySet<DeepReadonly<Entity>>,
   frame: FrameFunction,
 ): LoopFunction {
-  return async () => {
+  return async (time: number) => {
     let end: number | undefined;
     const start = performance.now();
 
     try {
       // Run the update for the engine
-      await engine.update();
+      await engine.update(time);
     } catch (error) {
       end = performance.now();
 
       throw new FrameError({
         engine,
-        entities: new Set(entities),
+        entities: new Set(entities) as Set<Entity>,
         specifier: "engine",
         code: "E_UPDATE",
         errors: [error as Error],
@@ -194,7 +288,7 @@ export function createLoop(
         // NOTE: Should the loop continue if an entity throws an error?
         throw new FrameError({
           engine,
-          entities: new Set(entities),
+          entities: new Set(entities) as Set<Entity>,
           specifier: "entity",
           code: "E_UPDATE",
           errors: [error as Error],
@@ -210,9 +304,13 @@ export function createLoop(
       ...[...entities].flatMap((entity) => [...entity.fragments]),
     ]);
 
-    // Clear the fragments for the engine and entities
+    // Clear the fragments for the engine
     engine.clearFragments();
-    entities.forEach((entity) => entity.clearFragments());
+
+    // Clear the fragments and events for all the entities
+    entities.forEach((entity) =>
+      entity.clearFragments() && entity.clearEvents()
+    );
 
     try {
       // Run the frame for all the collected fragments
@@ -223,7 +321,7 @@ export function createLoop(
 
       throw new FrameError({
         engine,
-        entities: new Set(entities),
+        entities: new Set(entities) as Set<Entity>,
         specifier: "frame",
         code: "E_FRAME",
         errors: [error as Error],
@@ -296,7 +394,7 @@ export interface TurnOptions {
    */
   frame: FrameFunction;
   /** The signal to abort the turn. */
-  signal?: AbortSignal;
+  signal: AbortSignal;
 }
 
 /**
@@ -329,7 +427,7 @@ export function turn({
 
   return {
     async next() {
-      if (signal?.aborted) {
+      if (signal.aborted) {
         return {
           done: true,
           value: undefined,
@@ -338,17 +436,18 @@ export function turn({
 
       // TODO: wait if the frame is too fast
 
-      let fragments: ReadonlySet<Fragment> | undefined;
+      let result: LoopResult;
 
       try {
-        const result = await loop();
-        fragments = result.fragments;
+        result = await loop(engine.time);
       } catch (error) {
         throw new AggregateError(
           [error],
           `Error running turn at frame ${engine.time}`,
         );
       }
+
+      const { fragments } = result;
 
       if (!fragments?.size) {
         return {

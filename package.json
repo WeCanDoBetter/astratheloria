@@ -26,10 +26,12 @@
   ],
   "devDependencies": {
     "@types/node": "^20.4.3",
+    "@types/noisejs": "^0.0.28",
     "@types/ws": "^8.5.5"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^1.9.5",
+    "noisejs": "^2.1.0",
     "ws": "^8.13.0"
   }
 }

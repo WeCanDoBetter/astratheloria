@@ -1,9 +1,9 @@
-import { createSlice } from "@reduxjs/toolkit";
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { RemoveFunctions } from "../lobby.js";
-import { Entity } from "../entity.js";
+import { Entity as EntityInterface } from "../loop.js";
 
 export interface EntitiesSliceState {
-  entities: Record<string, RemoveFunctions<Entity>>;
+  entities: Record<string, RemoveFunctions<EntityInterface>>;
 }
 
 const initialState: EntitiesSliceState = {
@@ -14,7 +14,7 @@ const entitiesSlice = createSlice({
   name: "entities",
   initialState,
   reducers: {
-    addEntity: (state, action) => {
+    addEntity: (state, action: PayloadAction<EntityInterface>) => {
       state.entities[action.payload.id] = action.payload;
     },
     removeEntity: (state, action) => {

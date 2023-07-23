@@ -201,7 +201,7 @@ export class Inventory extends EventTarget {
   }
 
   [Symbol.for("nodejs.util.inspect.custom")]() {
-    return this.toString();
+    return JSON.stringify(this.dump(), null, 2);
   }
 
   [Symbol.for("Deno.customInspect")]() {

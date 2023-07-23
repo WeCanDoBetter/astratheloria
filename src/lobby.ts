@@ -78,7 +78,7 @@ export interface Arena {
 
 export interface LobbyAnnouncer {
   url: URL;
-  authorization?: string;
+  authorization?: boolean;
 }
 
 export interface LobbyGameServerOptions {
@@ -147,7 +147,7 @@ export class Identity extends EventTarget {
   }
 
   /**
-   * Exports the public key as a hex-encoded string.
+   * Exports the public key as a hex-encoded JWK string.
    * @returns The exported public key.
    */
   async exportPublicKey(): Promise<string> {
@@ -222,6 +222,9 @@ export class Identity extends EventTarget {
     );
   }
 
+  /**
+   * Generates a key pair for the identity.
+   */
   private async generate(): Promise<void> {
     if (this.usable) {
       throw new Error("Identity already has a key pair");
@@ -245,7 +248,7 @@ export class Identity extends EventTarget {
   }
 }
 
-export class Participant {
+export class Participant extends EventTarget {
   /** The identity of the participant. */
   readonly identity: string;
   /** The socket of the participant. */
@@ -255,6 +258,7 @@ export class Participant {
   #publicKey: CryptoKey | undefined;
 
   constructor(identity: string, publicKey: string, socket: WebSocket) {
+    super();
     this.identity = identity;
     this.socket = socket;
 
@@ -270,6 +274,8 @@ export class Participant {
       ["verify"],
     ).then((key) => {
       this.#publicKey = key;
+    }).catch((error) => {
+      this.dispatchEvent(new ErrorEvent("error", { error }));
     });
   }
 
@@ -282,7 +288,7 @@ export class Participant {
   }
 
   verify(signature: string | ArrayBuffer, data: string | ArrayBuffer) {
-    if (!this.#publicKey) {
+    if (!this.usable) {
       throw new Error("Participant does not have a public key");
     }
 
@@ -291,7 +297,7 @@ export class Participant {
         name: "ECDSA",
         hash: "SHA-256",
       },
-      this.#publicKey,
+      this.#publicKey!,
       typeof signature === "string"
         ? new TextEncoder().encode(signature)
         : signature,
@@ -333,6 +339,13 @@ export class Participant {
 }
 
 export interface LobbyProvider {
+  /**
+   * Announces a game to the provider.
+   * @param id The id of the game to announce.
+   * @param host The host of the game.
+   * @param port The port of the game.
+   * @param arena The arena of the game.
+   */
   announce(
     id: string,
     host: string,
@@ -363,6 +376,9 @@ export class GameLobby {
 
   /** The participants that are in the lobby. */
   #participants: Set<Participant> = new Set();
+
+  /** The last time that the game was announced. */
+  #lastAnnounce = 0;
 
   constructor(options: LobbyGameOptions) {
     this.#provider = options.provider;
@@ -407,6 +423,13 @@ export class GameLobby {
    */
   get announcers(): ReadonlySet<LobbyAnnouncer> {
     return this.#announcers;
+  }
+
+  /**
+   * The last time that the game was announced.
+   */
+  get lastAnnounce(): number {
+    return this.#lastAnnounce;
   }
 
   /**
@@ -457,7 +480,7 @@ export class GameLobby {
         const headers: Record<string, string> = {};
 
         if (announcer.authorization) {
-          headers["Authorization"] = `Bearer ${announcer.authorization}`;
+          headers["Authorization"] = `Bearer ${this.identity.identity!}`;
         }
 
         const response = await fetch(url, {
@@ -466,7 +489,6 @@ export class GameLobby {
           headers: {
             "Content-Type": "application/json; charset=utf-8",
             "Content-Length": `${bodyBuf.byteLength}`,
-            "Identity": this.identity.identity!,
             "Signature": signature,
             "Api-Version": `${LOBBY_API_VERSION}`,
             "Runtime-Version": `${RTS_RUNTIME_VERSION}`,
@@ -484,6 +506,7 @@ export class GameLobby {
       }),
     );
 
+    this.#lastAnnounce = Date.now();
     return results;
   }
 
@@ -594,7 +617,7 @@ export class GameLobby {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    const expectedPath = `/lobby/${this.id}/socket/`;
+    const expectedPath = `/v1/lobby/${this.id}/s/`;
 
     if (req.url !== expectedPath) {
       const bodyBuf = new TextEncoder().encode(
@@ -611,6 +634,7 @@ export class GameLobby {
       res.setHeader("Runtime-Version", `${RTS_RUNTIME_VERSION}`);
       res.setHeader("Lua-Version", `${RTS_RUNTIME_LUA_VERSION}`);
       res.setHeader("Identity", publicKey);
+      res.setHeader("Public-Key", publicKey);
       res.setHeader("Signature", signature);
       res.end(bodyBuf);
       res.end();
@@ -672,23 +696,31 @@ export class GameLobby {
     const participant = new Participant(identity, publicKey, ws);
     this.#participants.add(participant);
 
-    ws.addEventListener("message", async ({ data }) => {
-      try {
-        const { signature, message } = JSON.parse(data);
+    ws.addEventListener(
+      "message",
+      async ({ data }: MessageEvent<Uint8Array>) => {
+        try {
+          if (data.byteLength < 64) {
+            throw new Error("Invalid signature");
+          }
 
-        if (typeof signature !== "string" || !signature.length) {
-          throw new Error("Missing signature");
-        }
+          const signature = data.subarray(0, 64);
+          const message = data.subarray(64);
 
-        if (typeof message !== "object" || message === null) {
-          throw new Error("Missing message");
-        }
+          if (!signature.byteLength) {
+            throw new Error("Missing signature");
+          }
 
-        if (await participant.verify(signature, JSON.stringify(message))) {
-          this.handleMessage(message);
-        }
-      } catch (_error) {}
-    });
+          if (!message.byteLength) {
+            throw new Error("Missing message");
+          }
+
+          if (await participant.verify(signature, message)) {
+            this.handleMessage(JSON.parse(new TextDecoder().decode(message)));
+          }
+        } catch (_error) {}
+      },
+    );
 
     ws.addEventListener("close", () => {
       this.#participants.delete(participant);
@@ -702,7 +734,7 @@ export class GameLobby {
 
 export interface ChatMessage {
   id: string;
-  identity: string;
+  source: string;
   createdAt: Date;
   message: string;
 }
@@ -762,11 +794,11 @@ export class GameLobbyChat {
    */
   async push(message: ChatMessage) {
     const sender = [...this.lobby.participants].find(
-      (participant) => participant.identity === message.identity,
+      (participant) => participant.identity === message.source,
     );
 
     if (!sender) {
-      throw new Error(`Participant ${message.identity} not found.`);
+      throw new Error(`Participant ${message.source} not found.`);
     }
 
     try {
@@ -801,3 +833,95 @@ type DeepReadonlyArray<T> = ReadonlyArray<DeepReadonly<T>>;
 type DeepReadonlyObject<T> = {
   readonly [P in keyof T]: DeepReadonly<T[P]>;
 };
+
+/**
+ * A remote identity is used to verify messages from a remote source. It is
+ * used to verify that a message came from a specific source.
+ *
+ * ```ts
+ * const remoteIdentity = new RemoteIdentity("id", "publicKey");
+ * const valid = await remoteIdentity.verify(signature, "message");
+ *
+ * if (valid) {
+ *  console.log("Message is valid");
+ * } else {
+ *  console.log("Message is invalid");
+ * }
+ * ```
+ */
+export class RemoteIdentity extends EventTarget {
+  /** The identity of the remote. */
+  readonly identity: string;
+
+  /** The public key of the remote. */
+  #publicKey?: CryptoKey;
+
+  constructor(identity: string, publicKey: string) {
+    super();
+    this.identity = identity;
+
+    // Import public key
+    this.importPublicKey(publicKey).catch((error) => {
+      this.dispatchEvent(new ErrorEvent("error", { error }));
+    });
+  }
+
+  /**
+   * The public key of the remote identity.
+   */
+  get publicKey(): CryptoKey | undefined {
+    return this.#publicKey;
+  }
+
+  /**
+   * Gets whether or not the remote identity has a public key.
+   */
+  get usable(): boolean {
+    return !!this.#publicKey;
+  }
+
+  /**
+   * Verifies the signature of the data with the remote identity's public key.
+   * @param signature The signature to verify.
+   * @param data The data to verify.
+   * @returns Whether or not the signature is valid.
+   */
+  verify(
+    signature: string | ArrayBuffer,
+    data: string | ArrayBuffer,
+  ): Promise<boolean> {
+    if (!this.#publicKey) {
+      throw new Error("Remote identity does not have a public key");
+    }
+
+    return crypto.subtle.verify(
+      {
+        name: "ECDSA",
+        hash: "SHA-256",
+      },
+      this.#publicKey,
+      typeof signature === "string"
+        ? new TextEncoder().encode(signature)
+        : signature,
+      typeof data === "string" ? new TextEncoder().encode(data) : data,
+    );
+  }
+
+  /**
+   * Import the public key of the remote identity. This will import the public
+   * key from a hex-encoded JWK string. The public key is used to verify
+   * messages from the remote.
+   */
+  private async importPublicKey(publicKey: string) {
+    this.#publicKey = await crypto.subtle.importKey(
+      "jwk",
+      JSON.parse(Buffer.from(publicKey, "hex").toString("utf8")),
+      {
+        name: "ECDSA",
+        namedCurve: "P-256",
+      },
+      false,
+      ["verify"],
+    );
+  }
+}

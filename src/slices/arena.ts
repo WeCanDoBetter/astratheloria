@@ -2,6 +2,7 @@ import { createSlice, PayloadAction } from "@reduxjs/toolkit";
 
 export interface Arena {
   readonly id: string;
+  readonly parentId?: string;
   readonly name: string;
   readonly description?: string;
   readonly author?: string;
